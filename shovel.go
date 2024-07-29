@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
+
+var timeout = time.Second * 15
 
 type shovel struct {
 	conn *amqp.Connection
