@@ -1,4 +1,4 @@
-package shovel
+package rabbitmq
 
 import (
 	"context"
@@ -9,11 +9,12 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-var timeout = time.Second * 15
-
 type shovel struct {
 	conn *amqp.Connection
 }
+
+// TODO: make this configurable
+var timeout = time.Second * 15
 
 // NewShovel return a shovel instance using the provided connection
 func NewShovel(conn *amqp.Connection) *shovel {
@@ -22,15 +23,9 @@ func NewShovel(conn *amqp.Connection) *shovel {
 	}
 }
 
-// MoveMessages move all messages from a queue and republish to other destination exchange within the same broker (or cluster)
+// MoveMessages consume all messages from a queue and republish to other destination exchange within the same broker (or cluster)
 func (s *shovel) MoveMessages(source, destination, routingKey string) error {
-	ch, err := s.conn.Channel()
-	if err != nil {
-		return fmt.Errorf("error opening channel from the connection: %w", err)
-	}
-	defer ch.Close()
-
-	err = s.moveMessages(ch, source, destination, routingKey)
+	err := s.moveMessages(source, destination, routingKey)
 	if err != nil {
 		return fmt.Errorf("error moving messages: %w", err)
 	}
@@ -38,36 +33,46 @@ func (s *shovel) MoveMessages(source, destination, routingKey string) error {
 	return nil
 }
 
-func (s *shovel) moveMessages(ch *amqp.Channel, source, destination, routingKey string) error {
-	ok := true
-	var msg amqp.Delivery
-	var err error
-
-	// confirm mode
-	err = ch.Confirm(false)
+func (s *shovel) moveMessages(source, destination, routingKey string) error {
+	ch, err := s.conn.Channel()
 	if err != nil {
-		return err
+		return fmt.Errorf("error opening new channel: %w", err)
 	}
+	defer ch.Close()
 
-	for ok {
-		msg, ok, err = ch.Get(source, false)
+	for {
+		msg, ok, err := ch.Get(source, false)
 		if err != nil {
 			return errors.Join(fmt.Errorf("error getting delivery from queue: %w", err), msg.Nack(false, true))
 		}
-		if ok {
-			// republish msg to destination exchange
-			err = republish(ch, msg.Body, destination, routingKey)
-			if err != nil {
-				return errors.Join(err, msg.Nack(false, true))
-			}
+
+		if !ok {
+			// no more messages in the queue
+			return nil
 		}
+
+		pubCh, err := s.conn.Channel()
+		if err != nil {
+			return fmt.Errorf("error opening new channel: %w", err)
+		}
+		// confirm mode
+		err = pubCh.Confirm(false)
+		if err != nil {
+			return err
+		}
+
+		// republish msg to destination exchange
+		err = republish(pubCh, msg.Body, destination, routingKey)
+		pubCh.Close()
+		if err != nil {
+			return errors.Join(err, msg.Nack(false, true))
+		}
+
 		err = msg.Ack(false)
 		if err != nil {
 			return fmt.Errorf("error acking delivery: %w", err)
 		}
 	}
-
-	return nil
 }
 
 func republish(ch *amqp.Channel, body []byte, destination, routingKey string) error {
